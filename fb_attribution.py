@@ -24,6 +24,9 @@ MAX_WORKERS = 12
 BATCH_SIZE = 1000
 ADVISORY_LOCK_ID = 777001
 
+# 🔁 CONTINUOUS MODE CONFIG (FREE RENDER)
+SLEEP_SECONDS = int(os.getenv("SLEEP_SECONDS", "300"))  # default: 5 minutes
+
 # =====================================================
 # GLOBAL CACHES
 # =====================================================
@@ -136,7 +139,7 @@ def resolve_meta_object(object_id):
     return None
 
 # =====================================================
-# MAIN
+# MAIN LOGIC (ONE ITERATION)
 # =====================================================
 
 def main():
@@ -155,10 +158,6 @@ def main():
 
         conn.commit()
         print("✅ Connected & lock acquired")
-
-        # -------------------------------------------------
-        # LOAD UNRESOLVED ROWS
-        # -------------------------------------------------
 
         print("📦 Loading unresolved Meta rows...")
 
@@ -183,10 +182,6 @@ def main():
             print("✅ Nothing to process")
             return
 
-        # -------------------------------------------------
-        # PARALLEL META RESOLUTION
-        # -------------------------------------------------
-
         unique_ids = sorted({r[4] for r in rows})
         print(f"⚡ Resolving {len(unique_ids)} unique Meta IDs...")
 
@@ -197,10 +192,6 @@ def main():
                     print(f"   🔄 {idx}/{len(unique_ids)} resolved")
 
         print("✅ Meta resolution complete")
-
-        # -------------------------------------------------
-        # UPDATE ROWS
-        # -------------------------------------------------
 
         update_sql = """
         UPDATE shopify_facebook_attribution SET
@@ -223,7 +214,6 @@ def main():
 
         for row_id, src, camp, content, term in rows:
             h = meta_cache.get(term)
-
             if h:
                 status = "RESOLVED_AD" if h["level"] == "AD" else "RESOLVED_ADSET"
                 batch.append((
@@ -263,11 +253,20 @@ def main():
 
         cur.close()
         conn.close()
-        print("🎯 FACEBOOK / IG ATTRIBUTION RECOVERY COMPLETE")
+        print("🎯 FACEBOOK / IG ATTRIBUTION CYCLE COMPLETE")
 
 # =====================================================
-# ENTRY POINT
+# CONTINUOUS WORKER (FREE RENDER MODE)
 # =====================================================
 
 if __name__ == "__main__":
-    main()
+    print("🚀 Meta attribution worker started (Render free web service)")
+
+    while True:
+        try:
+            main()
+        except Exception as e:
+            print("❌ Worker error:", e)
+
+        print(f"😴 Sleeping for {SLEEP_SECONDS} seconds...")
+        time.sleep(SLEEP_SECONDS)

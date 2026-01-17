@@ -23,13 +23,10 @@ TOKENS = [
 POSTGRES_URI = os.environ["POSTGRES_URI"]
 
 MAX_WORKERS = 12
-BATCH_SIZE = 1000
+BATCH_SIZE = 500
 ADVISORY_LOCK_ID = 777001
 
-# 🔁 CONTINUOUS MODE CONFIG (FREE RENDER)
-SLEEP_SECONDS = int(os.getenv("SLEEP_SECONDS", "300"))  # default: 5 minutes
-
-# 🌐 PORT CONFIG (FOR RENDER)
+SLEEP_SECONDS = int(os.getenv("SLEEP_SECONDS", "300"))
 HEALTH_PORT = 10001
 
 # =====================================================
@@ -40,7 +37,7 @@ meta_cache = {}
 failed_ids = set()
 
 # =====================================================
-# DUMMY HTTP SERVER (RENDER PORT CHECK)
+# HEALTH SERVER (RENDER)
 # =====================================================
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -49,9 +46,8 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(b"OK")
 
-    def log_message(self, format, *args):
-        return  # silence logs
-
+    def log_message(self, *_):
+        return
 
 def start_health_server():
     server = HTTPServer(("0.0.0.0", HEALTH_PORT), HealthHandler)
@@ -59,102 +55,79 @@ def start_health_server():
     server.serve_forever()
 
 # =====================================================
-# META RESOLUTION (AD → ADSET FALLBACK)
+# META RESOLUTION (AD → ADSET)
 # =====================================================
 
 def resolve_meta_object(object_id):
+    if not object_id or object_id in failed_ids:
+        return None
     if object_id in meta_cache:
         return meta_cache[object_id]
-    if object_id in failed_ids:
-        return None
 
     for token_name, token in TOKENS:
         try:
-            # ---------- TRY AS AD ----------
+            # ---- TRY AD ----
             ad_r = requests.get(
                 f"{GRAPH}/{object_id}",
-                params={
-                    "access_token": token,
-                    "fields": "name,adset_id,campaign_id"
-                },
+                params={"access_token": token, "fields": "name,adset_id,campaign_id"},
                 timeout=10
             )
-
-            if ad_r.status_code == 429:
-                time.sleep(1)
-                continue
 
             if ad_r.status_code == 200:
                 ad = ad_r.json()
-                adset_id = ad.get("adset_id")
-                campaign_id = ad.get("campaign_id")
-
-                if adset_id and campaign_id:
-                    adset_r = requests.get(
-                        f"{GRAPH}/{adset_id}",
+                if ad.get("adset_id") and ad.get("campaign_id"):
+                    adset = requests.get(
+                        f"{GRAPH}/{ad['adset_id']}",
                         params={"access_token": token, "fields": "name"},
                         timeout=10
-                    )
-                    camp_r = requests.get(
-                        f"{GRAPH}/{campaign_id}",
+                    ).json()
+
+                    camp = requests.get(
+                        f"{GRAPH}/{ad['campaign_id']}",
                         params={"access_token": token, "fields": "name,objective"},
                         timeout=10
-                    )
+                    ).json()
 
-                    if adset_r.status_code == 200 and camp_r.status_code == 200:
-                        result = {
-                            "level": "AD",
-                            "fb_ad_id": object_id,
-                            "fb_ad_name": ad.get("name"),
-                            "fb_adset_id": adset_id,
-                            "fb_adset_name": adset_r.json().get("name"),
-                            "fb_campaign_id": campaign_id,
-                            "fb_campaign_name": camp_r.json().get("name"),
-                            "fb_campaign_objective": camp_r.json().get("objective"),
-                            "resolved_with_token": token_name,
-                        }
-                        meta_cache[object_id] = result
-                        return result
+                    meta_cache[object_id] = {
+                        "level": "AD",
+                        "fb_ad_id": object_id,
+                        "fb_ad_name": ad.get("name"),
+                        "fb_adset_id": ad["adset_id"],
+                        "fb_adset_name": adset.get("name"),
+                        "fb_campaign_id": ad["campaign_id"],
+                        "fb_campaign_name": camp.get("name"),
+                        "fb_campaign_objective": camp.get("objective"),
+                        "resolved_with_token": token_name,
+                    }
+                    return meta_cache[object_id]
 
-            # ---------- TRY AS ADSET ----------
+            # ---- TRY ADSET ----
             adset_r = requests.get(
                 f"{GRAPH}/{object_id}",
-                params={
-                    "access_token": token,
-                    "fields": "name,campaign_id"
-                },
+                params={"access_token": token, "fields": "name,campaign_id"},
                 timeout=10
             )
 
-            if adset_r.status_code == 429:
-                time.sleep(1)
-                continue
-
             if adset_r.status_code == 200:
                 adset = adset_r.json()
-                campaign_id = adset.get("campaign_id")
+                camp = requests.get(
+                    f"{GRAPH}/{adset['campaign_id']}",
+                    params={"access_token": token, "fields": "name,objective"},
+                    timeout=10
+                ).json()
 
-                if campaign_id:
-                    camp_r = requests.get(
-                        f"{GRAPH}/{campaign_id}",
-                        params={"access_token": token, "fields": "name,objective"},
-                        timeout=10
-                    )
-
-                    if camp_r.status_code == 200:
-                        result = {
-                            "level": "ADSET",
-                            "fb_ad_id": None,
-                            "fb_ad_name": None,
-                            "fb_adset_id": object_id,
-                            "fb_adset_name": adset.get("name"),
-                            "fb_campaign_id": campaign_id,
-                            "fb_campaign_name": camp_r.json().get("name"),
-                            "fb_campaign_objective": camp_r.json().get("objective"),
-                            "resolved_with_token": token_name,
-                        }
-                        meta_cache[object_id] = result
-                        return result
+                meta_cache[object_id] = {
+                    "level": "ADSET",
+                    "fb_ad_id": None,
+                    "fb_ad_name": None,
+                    "fb_adset_id": object_id,
+                    "fb_adset_name": adset.get("name"),
+                    "fb_campaign_id": adset["campaign_id"],
+                    "fb_campaign_name": camp.get("name"),
+                    "fb_campaign_objective": camp.get("objective"),
+                    "resolved_with_token": token_name,
+                }
+                return meta_cache[object_id]
 
         except Exception:
             continue
@@ -163,110 +136,126 @@ def resolve_meta_object(object_id):
     return None
 
 # =====================================================
-# MAIN LOGIC (ONE ITERATION)
+# MAIN WORKER CYCLE
 # =====================================================
 
-def main():
-    print("🔌 Connecting to database...")
+def run_cycle():
     conn = psycopg2.connect(POSTGRES_URI)
     cur = conn.cursor()
 
     try:
         cur.execute("SET statement_timeout = 0;")
         cur.execute("SELECT pg_try_advisory_lock(%s);", (ADVISORY_LOCK_ID,))
-        locked = cur.fetchone()[0]
-
-        if not locked:
-            print("⛔ Another attribution job is already running")
+        if not cur.fetchone()[0]:
+            print("⛔ Job already running")
             return
-
         conn.commit()
-        print("✅ Connected & lock acquired")
 
-        print("📦 Loading unresolved Meta rows...")
+        # -------------------------------
+        # PHASE 1: BACKFILL NEW ORDERS
+        # -------------------------------
+        print("📥 Backfilling new Shopify rows...")
 
         cur.execute("""
-        SELECT
-          row_id,
-          utm_source,
-          utm_campaign,
-          utm_content,
-          utm_term
+        SELECT s.row_id, s.utm_source, s.utm_campaign, s.utm_content, s.utm_term
+        FROM shopify_orders_marketing s
+        LEFT JOIN shopify_facebook_attribution f
+          ON s.row_id = f.row_id
+        WHERE LOWER(s.utm_source) IN ('facebook','fb','ig','instagram')
+          AND f.row_id IS NULL
+        LIMIT 1000
+        """)
+
+        new_rows = cur.fetchall()
+
+        if new_rows:
+            ids = {r[4] for r in new_rows if r[4]}
+            with ThreadPoolExecutor(MAX_WORKERS) as ex:
+                list(as_completed([ex.submit(resolve_meta_object, i) for i in ids]))
+
+            insert_sql = """
+            INSERT INTO shopify_facebook_attribution (
+              row_id, utm_source, utm_campaign, utm_content, utm_term,
+              fb_ad_id, fb_ad_name, fb_adset_id, fb_adset_name,
+              fb_campaign_id, fb_campaign_name, fb_campaign_objective,
+              resolved_with_token, resolution_status, resolved_at
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """
+
+            batch = []
+            for r in new_rows:
+                h = meta_cache.get(r[4])
+                status = "RESOLVED_AD" if h and h["level"] == "AD" else \
+                         "RESOLVED_ADSET" if h else "UNRESOLVED"
+
+                batch.append((
+                    r[0], r[1], r[2], r[3], r[4],
+                    h.get("fb_ad_id") if h else None,
+                    h.get("fb_ad_name") if h else None,
+                    h.get("fb_adset_id") if h else None,
+                    h.get("fb_adset_name") if h else None,
+                    h.get("fb_campaign_id") if h else None,
+                    h.get("fb_campaign_name") if h else None,
+                    h.get("fb_campaign_objective") if h else None,
+                    h.get("resolved_with_token") if h else None,
+                    status,
+                    datetime.now(timezone.utc)
+                ))
+
+            execute_batch(cur, insert_sql, batch)
+            conn.commit()
+            print(f"✅ Inserted {len(batch)} new rows")
+
+        # -------------------------------
+        # PHASE 2: RECOVER UNRESOLVED
+        # -------------------------------
+        print("🔁 Retrying unresolved rows...")
+
+        cur.execute("""
+        SELECT row_id, utm_term
         FROM shopify_facebook_attribution
         WHERE resolution_status = 'UNRESOLVED'
-          AND LOWER(utm_source) IN ('facebook','fb','ig','instagram')
           AND utm_term ~ '^[0-9]{15,}$'
+        LIMIT 500
         """)
 
         rows = cur.fetchall()
-        total = len(rows)
-        print(f"🚀 Reprocessing {total} unresolved rows")
+        if rows:
+            ids = {r[1] for r in rows}
+            with ThreadPoolExecutor(MAX_WORKERS) as ex:
+                list(as_completed([ex.submit(resolve_meta_object, i) for i in ids]))
 
-        if total == 0:
-            print("✅ Nothing to process")
-            return
+            update_sql = """
+            UPDATE shopify_facebook_attribution SET
+              fb_ad_id=%s, fb_ad_name=%s,
+              fb_adset_id=%s, fb_adset_name=%s,
+              fb_campaign_id=%s, fb_campaign_name=%s,
+              fb_campaign_objective=%s,
+              resolved_with_token=%s,
+              resolution_status=%s,
+              resolved_at=%s
+            WHERE row_id=%s
+            """
 
-        unique_ids = sorted({r[4] for r in rows})
-        print(f"⚡ Resolving {len(unique_ids)} unique Meta IDs...")
+            batch = []
+            for row_id, term in rows:
+                h = meta_cache.get(term)
+                if h:
+                    batch.append((
+                        h["fb_ad_id"], h["fb_ad_name"],
+                        h["fb_adset_id"], h["fb_adset_name"],
+                        h["fb_campaign_id"], h["fb_campaign_name"],
+                        h["fb_campaign_objective"],
+                        h["resolved_with_token"],
+                        "RESOLVED_AD" if h["level"] == "AD" else "RESOLVED_ADSET",
+                        datetime.now(timezone.utc),
+                        row_id
+                    ))
 
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(resolve_meta_object, oid): oid for oid in unique_ids}
-            for idx, _ in enumerate(as_completed(futures), start=1):
-                if idx % 500 == 0:
-                    print(f"   🔄 {idx}/{len(unique_ids)} resolved")
-
-        print("✅ Meta resolution complete")
-
-        update_sql = """
-        UPDATE shopify_facebook_attribution SET
-          fb_ad_id = %s,
-          fb_ad_name = %s,
-          fb_adset_id = %s,
-          fb_adset_name = %s,
-          fb_campaign_id = %s,
-          fb_campaign_name = %s,
-          fb_campaign_objective = %s,
-          resolved_with_token = %s,
-          resolution_status = %s,
-          resolution_reason = NULL,
-          resolved_at = %s
-        WHERE row_id = %s
-        """
-
-        batch = []
-        processed = 0
-
-        for row_id, src, camp, content, term in rows:
-            h = meta_cache.get(term)
-            if h:
-                status = "RESOLVED_AD" if h["level"] == "AD" else "RESOLVED_ADSET"
-                batch.append((
-                    h["fb_ad_id"],
-                    h["fb_ad_name"],
-                    h["fb_adset_id"],
-                    h["fb_adset_name"],
-                    h["fb_campaign_id"],
-                    h["fb_campaign_name"],
-                    h["fb_campaign_objective"],
-                    h["resolved_with_token"],
-                    status,
-                    datetime.now(timezone.utc),
-                    row_id
-                ))
-
-            if len(batch) >= BATCH_SIZE:
+            if batch:
                 execute_batch(cur, update_sql, batch)
                 conn.commit()
-                processed += len(batch)
-                print(f"💾 {processed}/{total} updated")
-                batch.clear()
-
-        if batch:
-            execute_batch(cur, update_sql, batch)
-            conn.commit()
-            processed += len(batch)
-
-        print(f"🎉 Done: {processed}/{total} rows recovered")
+                print(f"♻️ Recovered {len(batch)} rows")
 
     finally:
         try:
@@ -274,29 +263,22 @@ def main():
             conn.commit()
         except Exception:
             pass
-
         cur.close()
         conn.close()
-        print("🎯 FACEBOOK / IG ATTRIBUTION CYCLE COMPLETE")
 
 # =====================================================
-# CONTINUOUS WORKER (FREE RENDER MODE)
+# ENTRYPOINT
 # =====================================================
 
 if __name__ == "__main__":
-    print("🚀 Meta attribution worker started (Render free web service)")
-
-    # Start dummy HTTP server for Render
-    threading.Thread(
-        target=start_health_server,
-        daemon=True
-    ).start()
+    threading.Thread(target=start_health_server, daemon=True).start()
+    print("🚀 Meta attribution worker running (backfill + recovery)")
 
     while True:
         try:
-            main()
+            run_cycle()
         except Exception as e:
             print("❌ Worker error:", e)
 
-        print(f"😴 Sleeping for {SLEEP_SECONDS} seconds...")
+        print(f"😴 Sleeping {SLEEP_SECONDS}s")
         time.sleep(SLEEP_SECONDS)

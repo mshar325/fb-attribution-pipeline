@@ -1,10 +1,12 @@
 import os
 import time
+import threading
 import requests
 import psycopg2
 from psycopg2.extras import execute_batch
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # =====================================================
 # CONFIG
@@ -27,12 +29,34 @@ ADVISORY_LOCK_ID = 777001
 # 🔁 CONTINUOUS MODE CONFIG (FREE RENDER)
 SLEEP_SECONDS = int(os.getenv("SLEEP_SECONDS", "300"))  # default: 5 minutes
 
+# 🌐 PORT CONFIG (FOR RENDER)
+HEALTH_PORT = 10001
+
 # =====================================================
 # GLOBAL CACHES
 # =====================================================
 
 meta_cache = {}
 failed_ids = set()
+
+# =====================================================
+# DUMMY HTTP SERVER (RENDER PORT CHECK)
+# =====================================================
+
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+
+    def log_message(self, format, *args):
+        return  # silence logs
+
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", HEALTH_PORT), HealthHandler)
+    print(f"🌐 Health server listening on port {HEALTH_PORT}")
+    server.serve_forever()
 
 # =====================================================
 # META RESOLUTION (AD → ADSET FALLBACK)
@@ -261,6 +285,12 @@ def main():
 
 if __name__ == "__main__":
     print("🚀 Meta attribution worker started (Render free web service)")
+
+    # Start dummy HTTP server for Render
+    threading.Thread(
+        target=start_health_server,
+        daemon=True
+    ).start()
 
     while True:
         try:
